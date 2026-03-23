@@ -62,18 +62,92 @@ def split_rows(raw: str) -> List[str]:
 
 def harvest_records(lines: List[str]) -> Dict[str, List[str]]:
     """
-    Group contiguous lines by student ID.
+    Group contiguous lines by student ID, but only start a new record when the line
+    looks like a real table row.
+
+    Safer rules:
+    1) Prefer TSV-like rows and read the ID from the "아이디" column (or 4th column fallback).
+    2) Ignore IDs that appear only inside URLs / file names / comments.
+    3) Non-row wrapped lines are appended to the current student's record.
     """
     buckets: Dict[str, List[str]] = {}
     current_id: Optional[str] = None
 
+    header_idx: Optional[int] = None
+
+    def normalize_cell(cell: str) -> str:
+        return cell.strip().strip('"').strip("'")
+
+    def find_id_in_tsv_row(ln: str) -> Optional[str]:
+        nonlocal header_idx
+
+        # Only trust tabular rows here
+        if "\t" not in ln:
+            return None
+
+        cols = [normalize_cell(c) for c in ln.split("\t")]
+
+        # Detect header row once
+        lowered = [c.replace(" ", "") for c in cols]
+        if "아이디" in lowered:
+            header_idx = lowered.index("아이디")
+            return None
+
+        # Prefer header-derived column
+        if header_idx is not None and header_idx < len(cols):
+            m = ID_RE.fullmatch(cols[header_idx])
+            if m:
+                return m.group(0)
+
+        # Fallback: many exports are
+        # 연번 / 학과명 / 성명 / 아이디 / ...
+        if len(cols) >= 4:
+            m = ID_RE.fullmatch(cols[3])
+            if m:
+                return m.group(0)
+
+        return None
+
+    def find_id_in_plain_row(ln: str) -> Optional[str]:
+        """
+        Conservative fallback for non-TSV rows:
+        only accept an ID if it appears near the beginning of a line that looks
+        like a table row, not inside URLs or arbitrary text.
+        """
+        s = ln.strip()
+        if not s:
+            return None
+
+        # Skip obvious URL/file-description lines
+        lower = s.lower()
+        if "github.com/" in lower or "raw.githubusercontent.com/" in lower:
+            return None
+
+        # Example accepted shapes:
+        # "12 컴퓨터공학과 홍길동 5880642 제출 ..."
+        # "12  컴퓨터공학과  홍길동  5880642"
+        m = re.match(
+            r'^\s*\d+\s+\S+(?:\s+\S+){0,3}\s+(?P<sid>\d{6,})\b',
+            s
+        )
+        if m:
+            return m.group("sid")
+
+        return None
+
     for ln in lines:
-        ids = ID_RE.findall(ln)
-        if ids:
-            sid = ids[-1]
+        sid = find_id_in_tsv_row(ln)
+        if sid is None:
+            sid = find_id_in_plain_row(ln)
+
+        if sid is not None:
             if current_id != sid:
                 current_id = sid
                 buckets.setdefault(current_id, [])
+            buckets[current_id].append(ln)
+            continue
+
+        # Continuation / wrapped line: append only if we already entered a record
         if current_id is not None:
             buckets[current_id].append(ln)
 
