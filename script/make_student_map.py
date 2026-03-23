@@ -2,22 +2,26 @@
 # -*- coding: utf-8 -*-
 
 """
-Parse a pasted table-like text (e.g., exported from Excel) that contains columns like:
-  연번, 학과명, 성명, 아이디, 제출여부, ..., 과제설명
-and build a student_map.json:
+Parse a pasted table-like text and build a JSON like:
+
 {
-  "limit": "2025-09-09T00:00:00Z",   # optional if --limit provided
+  "limit": "2025-09-09T00:00:00Z",
   "students": [
-    {"id":"5880642", "url":"https://github.com/.../blob/.../ex01.c"},
-    ...
+    {
+      "id": "5702952",
+      "urls": [
+        "https://github.com/...",
+        "https://github.com/..."
+      ]
+    }
   ]
 }
 
-Key features:
-- Normalizes full-width characters (NFKC) and weird spaced schemes like "ＨＴＴＰＳ ://"
-- Extracts GitHub URLs from the "assignment description" field even if it spans multiple lines
-- By default, only keeps GitHub links that look like a code file (.c/.cpp) under blob/raw
-- CLI options allow including non-file URLs, filtering to only "제출" rows, etc.
+Key changes from the old version:
+- keeps ALL extracted GitHub URLs per student
+- supports blob/raw/tree/repo-root style GitHub links
+- normalizes full-width URL text like "ＨＴＴＰＳ ://"
+- handles inline comments after URLs
 """
 
 import argparse
@@ -25,63 +29,47 @@ import json
 import re
 import sys
 import unicodedata
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Optional
 
 # --- Regex helpers -----------------------------------------------------------
 
-# After normalization we still forgive stray spaces after scheme, e.g. "https ://"
 SCHEME_FIX_RE = re.compile(r'\b(https?)\s*:\s*//', re.IGNORECASE)
 
-# Match GitHub URLs robustly (blob/raw/tree allowed; we will filter later)
+# GitHub URL matcher:
+# - blob / raw / tree links
+# - repo root links
+# - stop before whitespace or obvious trailing delimiters
 GITHUB_URL_RE = re.compile(
-    r'(https?://(?:www\.)?github\.com/[^\s]+)', re.IGNORECASE
+    r'(https?://(?:www\.)?github\.com/[^\s\]\)\>\"\'\u3000]+)',
+    re.IGNORECASE
 )
 
-# Simple integer-ish ID (7+ digits typical in your sheet)
 ID_RE = re.compile(r'\b\d{6,}\b')
-
-# File extension filter (default policy keeps C/C++ files only)
-CODE_EXT_RE = re.compile(r'\.(?:c|cpp|cc|cxx|h|hpp)$', re.IGNORECASE)
-
-# Blob/raw markers
-BLOB_OR_RAW_RE = re.compile(r'/(blob|raw)/', re.IGNORECASE)
 
 
 # --- Core functions ----------------------------------------------------------
 
 def normalize_text(s: str) -> str:
-    """Normalize full-width ASCII etc. and collapse scheme spaces."""
-    # Unicode NFKC handles full-width → ASCII (Ｈ→H, ：→:)
+    """Normalize full-width ASCII etc. and collapse broken schemes."""
     s = unicodedata.normalize('NFKC', s)
-    # Fix "https ://" → "https://"
     s = SCHEME_FIX_RE.sub(r'\1://', s)
     return s
 
 
 def split_rows(raw: str) -> List[str]:
-    """
-    Heuristic row splitter:
-    - Many exports are TSV/CSV-like but wrapped.
-    - We split by newline, yet we later reconstruct per student by scanning for '아이디' then hoovering subsequent lines until next id.
-    More stable: group lines into records keyed by the *latest ID seen*.
-    """
-    lines = [ln.rstrip() for ln in raw.splitlines()]
-    return lines
+    return [ln.rstrip() for ln in raw.splitlines()]
 
 
 def harvest_records(lines: List[str]) -> Dict[str, List[str]]:
     """
-    Group contiguous lines to a record bucket keyed by a student ID.
-    If a line contains a new ID, start a new bucket.
+    Group contiguous lines by student ID.
     """
     buckets: Dict[str, List[str]] = {}
     current_id: Optional[str] = None
 
     for ln in lines:
         ids = ID_RE.findall(ln)
-        # If a line has exactly one new ID and it's not the same as current, start new record.
         if ids:
-            # Choose the first plausible ID; if multiple, pick the last 7+ digits token.
             sid = ids[-1]
             if current_id != sid:
                 current_id = sid
@@ -93,12 +81,6 @@ def harvest_records(lines: List[str]) -> Dict[str, List[str]]:
 
 
 def extract_submission_flag(record_text: str) -> Optional[bool]:
-    """
-    Try to decide if this record is a submitted one.
-    Returns True/False/None (unknown).
-    """
-    # Look for "제출여부\t제출" or a standalone '제출' token near the header area.
-    # Since the record text is a concatenation, this is heuristic.
     if "미제출" in record_text:
         return False
     if "제출" in record_text:
@@ -106,89 +88,70 @@ def extract_submission_flag(record_text: str) -> Optional[bool]:
     return None
 
 
+def clean_url(url: str) -> str:
+    """
+    Clean trailing punctuation / inline comments around a URL.
+    """
+    url = url.strip()
+
+    # remove trailing punctuation/brackets often attached in pasted text
+    url = url.strip(")]};,\'\"）』」〉>…")
+
+    # remove spaces around slashes if broken by paste
+    url = re.sub(r'\s+/', '/', url)
+    url = re.sub(r'/\s+', '/', url)
+
+    # remove inline " // comment" only if it is separated by whitespace
+    url = re.sub(r'\s+//.*$', '', url)
+
+    return url
+
+
 def extract_urls(record_text: str) -> List[str]:
-    """Find GitHub URLs present in the record text."""
-    # Replace spaces inside parentheses that sometimes break URLs
-    # (We already normalized "https ://" → "https://")
+    """
+    Extract ALL GitHub URLs in a student block.
+    """
     found = GITHUB_URL_RE.findall(record_text)
-    # Clean trailing punctuation
-    cleaned = []
-    for url in found:
-        url = url.strip().strip(')];,\'"）』」〉>…')
-        # Some exports insert spaces inside the path. Remove internal spaces around slashes.
-        url = re.sub(r'\s+/', '/', url)
-        url = re.sub(r'/\s+', '/', url)
-        cleaned.append(url)
-    # Dedup while preserving order
+
+    cleaned: List[str] = []
     seen = set()
-    uniq = []
-    for u in cleaned:
-        if u not in seen:
+
+    for url in found:
+        u = clean_url(url)
+        if u and u not in seen:
             seen.add(u)
-            uniq.append(u)
-    return uniq
+            cleaned.append(u)
 
-
-def choose_best_url(urls: List[str], strict_code_only: bool) -> Optional[str]:
-    """
-    Choose the most likely source file URL.
-    Preference:
-      1) blob/raw + code extension (.c/.cpp/...)
-      2) any blob/raw
-      3) otherwise first GitHub URL (if strict_code_only=False)
-    """
-    # 1) blob/raw + code extension
-    for u in urls:
-        if BLOB_OR_RAW_RE.search(u) and CODE_EXT_RE.search(u):
-            return u
-    # 2) any blob/raw
-    for u in urls:
-        if BLOB_OR_RAW_RE.search(u):
-            if not strict_code_only:
-                return u
-    # 3) first github url if allowed
-    if not strict_code_only and urls:
-        return urls[0]
-    return None
+    return cleaned
 
 
 def build_map(
     text: str,
     limit: Optional[str],
-    only_submitted: bool,
-    strict_code_only: bool
+    only_submitted: bool
 ) -> Dict:
-    """
-    Convert full pasted table text → student_map dict.
-    """
     norm = normalize_text(text)
     lines = split_rows(norm)
     buckets = harvest_records(lines)
 
-    students: List[Dict[str, str]] = []
-    seen_ids = set()
-    seen_pairs = set()
+    students: List[Dict[str, object]] = []
 
     for sid, rec_lines in buckets.items():
         block = "\n".join(rec_lines)
-        # Filter by '제출' if requested
+
         if only_submitted:
             flag = extract_submission_flag(block)
             if flag is False:
                 continue
 
         urls = extract_urls(block)
-        best = choose_best_url(urls, strict_code_only=strict_code_only)
-        if not best:
-            continue  # skip rows without a usable URL
-
-        # Deduplicate
-        if sid in seen_ids and (sid, best) in seen_pairs:
+        if not urls:
             continue
-        seen_ids.add(sid)
-        seen_pairs.add((sid, best))
 
-        students.append({"id": sid, "url": best})
+        students.append({
+            "id": sid,
+            "urls": urls
+        })
 
     out = {"students": students}
     if limit:
@@ -210,14 +173,11 @@ def main():
                    help="ISO8601 timestamp for grading cutoff, e.g., 2025-09-09T00:00:00Z")
     p.add_argument("--only-submitted", action="store_true",
                    help="Keep only rows that look like '제출'.")
-    p.add_argument("--include-nonfile", action="store_true",
-                   help="Include non-file GitHub URLs (e.g., repo root/tree).")
     p.add_argument("--pretty", action="store_true",
                    help="Pretty-print JSON (indent=2).")
 
     args = p.parse_args()
 
-    # Read input text
     if args.input == "-":
         raw = sys.stdin.read()
     else:
@@ -228,10 +188,8 @@ def main():
         text=raw,
         limit=args.limit,
         only_submitted=args.only_submitted,
-        strict_code_only=(not args.include_nonfile),
     )
 
-    # Write JSON
     with open(args.out, "w", encoding="utf-8") as f:
         if args.pretty:
             json.dump(student_map, f, ensure_ascii=False, indent=2)

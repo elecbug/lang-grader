@@ -51,7 +51,6 @@ echo "Generating ${STUDENT_MAP_NAME} for suite '${SUITE_NAME}' with limit '${LIM
   --limit "${LIMIT_ISO}" \
   --only-submitted \
   --pretty \
-  --include-nonfile \
   -o "${OUT_JSON}"
 
 echo "Done."

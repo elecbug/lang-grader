@@ -26,17 +26,11 @@ class Config:
     map_path: str
     suite: str
     data_root: str = "data"
-    rename_to: str = "main.c"
-    keep_original: bool = False
     respect_limit: bool = False
-    scope: str = "repo" # "repo" | "dir"
-    preserve_subdirs: bool = True
-    force_rename: bool = False
     github_token: Optional[str] = None
 
     def suite_dir(self) -> str:
         return os.path.join(self.data_root, self.suite)
-
 
 @dataclass
 class RepoRef:
