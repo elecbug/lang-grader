@@ -31,6 +31,7 @@ class Config:
 
     def suite_dir(self) -> str:
         return os.path.join(self.data_root, self.suite)
+    
 
 @dataclass
 class RepoRef:

@@ -13,7 +13,7 @@ from grade_fetcher.service import FetchService
 
 def build_argparser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
-        description="Fetch ONLY explicitly listed GitHub files per student."
+        description="Fetch explicitly listed GitHub files or directories per student."
     )
     ap.add_argument("--map", required=True, help="Path to student map JSON ({limit, students}).")
     ap.add_argument("--suite", required=True, help="Suite name (staged under data/<suite>/).")
