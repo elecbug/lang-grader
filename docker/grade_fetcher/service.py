@@ -59,6 +59,10 @@ class FetchService:
         student_root = os.path.join(self.cfg.suite_dir(), stu_id)
         ensure_dir(student_root)
 
+        # [수정됨] 덮어쓰기 방지를 위해 저장소 소유자(owner)와 이름(repo)으로 폴더를 분리합니다.
+        repo_base_dir = os.path.join(student_root, r.owner, r.repo)
+        ensure_dir(repo_base_dir)
+
         saved_count = 0
 
         # 0) repo root: copy whole repository
@@ -66,8 +70,9 @@ class FetchService:
             try:
                 tree = self.gh.list_tree(r.owner, r.repo, sha)
             except Exception as e:
+                # [수정됨] 에러 로그도 분리된 폴더에 저장합니다.
                 record_failure(
-                    student_root,
+                    repo_base_dir,
                     submitted_url,
                     Status.TREE_LIST_FAILED,
                     "Failed to enumerate full repository tree",
@@ -85,7 +90,7 @@ class FetchService:
 
             if not targets:
                 record_failure(
-                    student_root,
+                    repo_base_dir,
                     submitted_url,
                     Status.NO_SOURCES_FOUND,
                     "No files found in repository",
@@ -95,14 +100,15 @@ class FetchService:
             for p in targets:
                 try:
                     data = self.gh.fetch_raw(r.owner, r.repo, sha, p)
-                    dst = os.path.join(student_root, p)
+                    # [수정됨] student_root 대신 repo_base_dir를 베이스로 사용합니다.
+                    dst = os.path.join(repo_base_dir, p)
                     safe_write(dst, data)
                     saved_count += 1
                 except Exception as e:
                     print(f"[{stu_id}] fetch failed for {p}: {e}")
 
             write_json_merge(
-                os.path.join(student_root, ".submission_meta.json"),
+                os.path.join(repo_base_dir, ".submission_meta.json"),
                 {
                     "submitted_url": submitted_url,
                     "submitted_kind": "repo_root",
@@ -117,7 +123,7 @@ class FetchService:
         meta = self.gh.get_contents_meta(r.owner, r.repo, r.path, sha)
         if not meta:
             record_failure(
-                student_root,
+                repo_base_dir,
                 submitted_url,
                 Status.REPRESENTATIVE_FETCH_FAILED,
                 f"Path not found at ref: {r.path}",
@@ -128,12 +134,13 @@ class FetchService:
         if meta["type"] == "file":
             try:
                 data = self.gh.fetch_raw(r.owner, r.repo, sha, r.path)
-                dst = os.path.join(student_root, r.path)
+                # [수정됨] 개별 파일 다운로드 시에도 폴더 구조를 유지합니다.
+                dst = os.path.join(repo_base_dir, r.path)
                 safe_write(dst, data)
                 saved_count = 1
 
                 write_json_merge(
-                    os.path.join(student_root, ".submission_meta.json"),
+                    os.path.join(repo_base_dir, ".submission_meta.json"),
                     {
                         "submitted_url": submitted_url,
                         "submitted_kind": "file",
@@ -146,7 +153,7 @@ class FetchService:
                 return saved_count
             except Exception as e:
                 record_failure(
-                    student_root,
+                    repo_base_dir,
                     submitted_url,
                     Status.REPRESENTATIVE_FETCH_FAILED,
                     f"Failed to fetch file: {r.path}",
@@ -162,7 +169,7 @@ class FetchService:
                 tree = self.gh.list_tree(r.owner, r.repo, sha)
             except Exception as e:
                 record_failure(
-                    student_root,
+                    repo_base_dir,
                     submitted_url,
                     Status.TREE_LIST_FAILED,
                     f"Failed to enumerate tree for directory: {dir_prefix}",
@@ -180,7 +187,7 @@ class FetchService:
 
             if not targets:
                 record_failure(
-                    student_root,
+                    repo_base_dir,
                     submitted_url,
                     Status.NO_SOURCES_FOUND,
                     f"No files found under directory: {dir_prefix}",
@@ -190,14 +197,15 @@ class FetchService:
             for p in targets:
                 try:
                     data = self.gh.fetch_raw(r.owner, r.repo, sha, p)
-                    dst = os.path.join(student_root, p)
+                    # [수정됨] 디렉터리 내 파일들도 동일하게 처리합니다.
+                    dst = os.path.join(repo_base_dir, p)
                     safe_write(dst, data)
                     saved_count += 1
                 except Exception as e:
                     print(f"[{stu_id}] fetch failed for {p}: {e}")
 
             write_json_merge(
-                os.path.join(student_root, ".submission_meta.json"),
+                os.path.join(repo_base_dir, ".submission_meta.json"),
                 {
                     "submitted_url": submitted_url,
                     "submitted_kind": "dir",
@@ -210,7 +218,7 @@ class FetchService:
             return saved_count
 
         record_failure(
-            student_root,
+            repo_base_dir,
             submitted_url,
             Status.REPRESENTATIVE_FETCH_FAILED,
             f"Unsupported path type: {meta.get('type')}",
@@ -261,12 +269,16 @@ class FetchService:
                         str(e),
                     )
                     continue
+                
+                # [수정됨] run_for_map 레벨에서도 실패 기록이 겹치지 않게 분기된 폴더를 준비합니다.
+                repo_base_dir = os.path.join(student_root, ref.owner, ref.repo)
+                ensure_dir(repo_base_dir)
 
                 try:
                     sha = self._resolve_ref(stu, ref, limit_dt)
                 except Exception as e:
                     record_failure(
-                        student_root,
+                        repo_base_dir,
                         str(url),
                         Status.HEAD_LOOKUP_FAILED,
                         "Could not resolve branch HEAD",
@@ -276,7 +288,7 @@ class FetchService:
 
                 if limit_dt is not None and not sha:
                     record_failure(
-                        student_root,
+                        repo_base_dir,
                         str(url),
                         Status.NO_COMMIT_BEFORE_LIMIT,
                         f"No commit on '{ref.branch}' <= {limit_dt.isoformat()}",
