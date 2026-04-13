@@ -18,11 +18,11 @@ fi
 
 # Path to merge script (assumed same directory as this script)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-MERGE_SCRIPT="$SCRIPT_DIR/merge_files.sh"
+MERGE_SCRIPT="$SCRIPT_DIR/merge.sh"
 
 # Check merge script existence
 if [ ! -f "$MERGE_SCRIPT" ]; then
-    echo "merge_files.sh not found in $SCRIPT_DIR"
+    echo "merge.sh not found in $SCRIPT_DIR"
     exit 1
 fi
 
