@@ -40,7 +40,7 @@ SCHEME_FIX_RE = re.compile(r'\b(https?)\s*:\s*//', re.IGNORECASE)
 # - repo root links
 # - stop before whitespace or obvious trailing delimiters
 GITHUB_URL_RE = re.compile(
-    r'(https?://(?:www\.)?github\.com/[^\s\]\)\>\"\'\u3000]+)',
+    r'(https?://(?:www\.)?github\.com/[^\s\]\">\'\u3000]+)',
     re.IGNORECASE
 )
 
@@ -165,11 +165,9 @@ def extract_submission_flag(record_text: str) -> Optional[bool]:
 def clean_url(url: str) -> str:
     """
     Clean trailing punctuation / inline comments around a URL.
+    Preserve valid parentheses inside path names.
     """
     url = url.strip()
-
-    # remove trailing punctuation/brackets often attached in pasted text
-    url = url.strip(")]};,\'\"）』」〉>…")
 
     # remove spaces around slashes if broken by paste
     url = re.sub(r'\s+/', '/', url)
@@ -177,6 +175,37 @@ def clean_url(url: str) -> str:
 
     # remove inline " // comment" only if it is separated by whitespace
     url = re.sub(r'\s+//.*$', '', url)
+
+    # remove obvious trailing punctuation, but keep ')' for balanced paths
+    while url and url[-1] in ';,\'"』」〉>…':
+        url = url[:-1]
+
+    # remove trailing ] or } if obviously unmatched
+    while url.endswith(']'):
+        if url.count('[') < url.count(']'):
+            url = url[:-1]
+        else:
+            break
+
+    while url.endswith('}'):
+        if url.count('{') < url.count('}'):
+            url = url[:-1]
+        else:
+            break
+
+    # remove trailing ')' only when unmatched
+    while url.endswith(')'):
+        if url.count('(') < url.count(')'):
+            url = url[:-1]
+        else:
+            break
+
+    # same for full-width parenthesis
+    while url.endswith('）'):
+        if url.count('（') < url.count('）'):
+            url = url[:-1]
+        else:
+            break
 
     return url
 
